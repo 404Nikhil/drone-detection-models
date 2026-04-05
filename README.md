@@ -5,6 +5,23 @@
 
 ---
 
+## 🌐 Interactive Web Dashboard (React + FastAPI)
+
+This repository includes a fully functional local web dashboard to visually deploy and test all four native architectures and dynamic ensemble methodologies locally! 
+
+### UI Features Included:
+- **Real-Time Bounding Visuals:** Instantly upload any image format and natively watch WBF bounding limits structure live via Canvas rendering.
+- **Auto-Pad Scale Tweaker (Domain Bias Bypass):** Neural Networks naturally over-fit target boundaries depending heavily on image scale sizes during the training sequences. This UI features an integrated algorithmic bounding-box padding constraint slider that systematically scales massive out-of-distribution web images down geometrically to perfectly resemble dataset constraints.
+- **Dynamic Confidence Override:** Forcefully bypass background negative detection anomalies by explicitly dialing the internal neural evaluation threshold instantly up to `95%` or cleanly bypassing strict requirements down to `10%` to view raw pipeline math calculations dynamically!
+
+## 🚀 How to Run the App
+Simply drag and drop the `run.sh` terminal script natively within the main directory to spin up the local dual-stack API execution protocol handling both the Next-Gen Vite React hooks alongside the strict Uvicorn background FastAPI processes simultaneously! 
+```bash
+./run.sh
+```
+
+---
+
 ## 📋 Table of Contents
 
 1. [Project Overview](#-project-overview)
