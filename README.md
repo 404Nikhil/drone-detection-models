@@ -1,7 +1,7 @@
-# 🚁 Drone Detection — Multi-Model Comparison Study
+# 🚁 Drone Detection — Multi-Model Comparison & Ensemble Study
 
 > **Course Project | Computer Vision & Deep Learning**  
-> Comparing three state-of-the-art object detection architectures on an aerial drone dataset.
+> Trains, benchmarks, and **ensembles** four state-of-the-art object detection architectures on an aerial drone dataset.
 
 ---
 
@@ -13,16 +13,19 @@
 4. [Model 1 — YOLOv8s](#-model-1--yolov8s-you-only-look-once-v8-small)
 5. [Model 2 — Faster R-CNN](#-model-2--faster-r-cnn-mobilenetv3-large-320-fpn)
 6. [Model 3 — SSD MobileNet V3](#-model-3--ssd-mobilenet-v3-large)
-7. [Comparison Report](#-comparison-report)
-8. [Key Takeaways](#-key-takeaways)
-9. [Environment & Hardware](#-environment--hardware)
-10. [File Structure](#-file-structure)
+7. [Model 4 — RT-DETR-L](#-model-4--rt-detr-l-real-time-detection-transformer)
+8. [Benchmark Notebook](#-benchmark-notebook)
+9. [Multi-Model Architecture & Ensemble](#-multi-model-architecture--ensemble)
+10. [Comparison Report](#-comparison-report)
+11. [Key Takeaways](#-key-takeaways)
+12. [Environment & Hardware](#-environment--hardware)
+13. [File Structure](#-file-structure)
 
 ---
 
 ## 🎯 Project Overview
 
-This project trains and evaluates **three different deep learning object detection models** on an aerial drone dataset. The goal is to detect and classify flying objects — **Airplanes**, **Drones**, and **Helicopters** — from images, and to compare the trade-offs between speed, accuracy, and model complexity.
+This project trains and evaluates **four deep learning object detection models** on an aerial drone dataset, then combines them into an **ensemble** for superior detection performance. The goal is to detect and classify flying objects — **Airplanes**, **Drones**, and **Helicopters** — from images, compare the trade-offs between speed, accuracy, and model complexity, and finally demonstrate how combining models outperforms any single model alone.
 
 | Notebook | Purpose |
 |---|---|
@@ -31,6 +34,9 @@ This project trains and evaluates **three different deep learning object detecti
 | `ssdnet.ipynb` | SSD MobileNet V3 training (Kaggle) |
 | `ssd_net_kaggle_main.ipynb` | SSD local inference & evaluation |
 | `fastercnn_drone_test.ipynb` | Faster R-CNN inference & evaluation |
+| `detr_kaggle.ipynb` | RT-DETR-L training (Kaggle) |
+| `benchmark_models.ipynb` | **Multi-model inference benchmark** (timing, mAP, FPS) |
+| `multi_model_architecture.ipynb` | **Multi-model ensemble** (WBF fusion + cascade inference) |
 
 ---
 
@@ -435,7 +441,207 @@ for t in np.linspace(0, 1, 11):
 
 ---
 
-## 📊 Comparison Report
+## 🔴 Model 4 — RT-DETR-L (Real-Time Detection Transformer)
+
+### Architecture
+
+RT-DETR (Real-Time DEtection TRansformer) is a **transformer-based detector** that achieves competitive accuracy with YOLO-level speed. Unlike two-stage detectors, RT-DETR uses a **hybrid encoder** combining CNN feature extraction with an efficient transformer encoder, and a **bipartite matching decoder** that eliminates the need for NMS post-processing entirely.
+
+```
+Input Image (640×640)
+       ↓
+ResNet-50 Backbone (multi-scale feature extraction)
+       ↓
+Hybrid Encoder:
+  ├── Intra-scale Interaction (CNN conv on each scale)
+  └── Cross-scale Fusion (Transformer attention across scales)
+       ↓
+Transformer Decoder
+  └── Bipartite Matching Head (Hungarian algorithm)
+       ↓
+Final Detections (no NMS needed)
+```
+
+### Key Concepts
+
+- **No NMS:** The transformer decoder uses Hungarian bipartite matching — each query is assigned to at most one object. This eliminates duplicate detections without NMS, making inference fully deterministic.
+- **Hybrid Encoder:** Combines convolutional efficiency (for local features) with transformer attention (for global context), giving it an edge over YOLO for detecting occluded or distant drones.
+- **Global Attention:** The self-attention mechanism in the transformer allows the model to reason about relationships between objects across the entire image simultaneously.
+
+### Training Configuration
+
+| Parameter | Value |
+|---|---|
+| **Base Model** | `rtdetr-l.pt` (COCO pretrained) |
+| **Epochs** | 30 |
+| **Image Size** | 640×640 |
+| **Batch Size** | 8 (transformer is memory-heavy) |
+| **Training Platform** | Kaggle GPU |
+| **AMP** | ✅ Mixed Precision (`amp=True`) |
+| **Early Stopping** | Patience = 10 epochs |
+| **Saved Weights** | `best_detr.pt` (~189 MB) |
+
+---
+
+## 📊 Benchmark Notebook
+
+**File:** `benchmark_models.ipynb`
+
+### Purpose
+
+A **scientific benchmarking framework** that runs all four trained models on the full 596-image test set and produces a publication-quality comparison of inference speed, confidence, detection counts, and mAP@0.5.
+
+### What It Measures
+
+| Metric | Description |
+|--------|-------------|
+| **Avg / Median / P95 Latency (ms)** | Central tendency and tail latency of inference time per image |
+| **FPS** | Frames per second (1000 / avg_ms) |
+| **Avg Confidence** | Mean confidence score of all detections above threshold |
+| **mAP@0.5** | Mean Average Precision at IoU threshold 0.5, computed via `torchmetrics` |
+| **Per-class detection counts** | How many AirPlane / Drone / Helicopter detections each model made |
+
+### How mAP is Computed
+
+```python
+from torchmetrics.detection import MeanAveragePrecision
+
+metric = MeanAveragePrecision(iou_thresholds=[0.5])
+for image in test_set:
+    pred_boxes, pred_scores, pred_labels = run_inference(image)
+    gt_boxes, gt_labels = parse_yolo_labels(image)
+    metric.update([{...predictions...}], [{...ground_truth...}])
+result = metric.compute()  # → {'map_50': ..., 'map': ...}
+```
+
+### Key Design Decisions
+
+- **Warm-up runs:** 3 images are run before timing begins to eliminate cold-start JIT/GPU overhead.
+- **`conf_override=0.01` for RT-DETR:** RT-DETR outputs lower raw confidence scores than YOLO. Using the global `CONF_THRESH=0.30` would filter out valid detections. A lower override allows fair comparison.
+- **AMP-aware timing:** Timer wraps only the forward pass, not data loading, to measure pure model speed.
+
+### Outputs
+
+- `benchmark_results.csv` — full results table
+- `fig1_latency.png` — latency bar charts (avg, median, P95)
+- `fig2_fps_confidence.png` — FPS vs confidence scatter
+- `fig3_per_class.png` — per-class detection distribution
+- `fig4_tradeoff.png` — speed vs accuracy Pareto curve
+- `fig5_latency_box.png` — latency distribution box plots
+- `fig6_map.png` — mAP@0.5 comparison bar chart
+
+### Benchmark Results (Apple MPS — Mac M4)
+
+| Model | Avg ms | FPS | Avg Conf | mAP@0.5 | Total Det |
+|-------|--------|-----|----------|---------|-----------|
+| **YOLOv8s** | 64.3 | 15.5 | 0.661 | 0.930 | 495 |
+| **RT-DETR-L** | 404.6 | 2.5 | 0.650 | 0.690 | 698 |
+| **Faster R-CNN** | 203.0 | 4.9 | 0.810 | 0.890 | 727 |
+| **SSD** | **28.3** | **35.4** | **0.840** | 0.760 | 444 |
+
+> Green = best in column. YOLOv8s wins on mAP; SSD wins on speed and confidence.
+
+---
+
+## 🧬 Multi-Model Architecture & Ensemble
+
+**File:** `multi_model_architecture.ipynb`
+
+### Purpose — Why Combine Models?
+
+Each model has distinct strengths and blind spots. The **multi-model architecture notebook** combines all four trained models into an **ensemble** — a single detector that is more accurate and robust than any individual model.
+
+| Model | Strength | Weakness |
+|-------|----------|---------|
+| **YOLOv8s** | Fast (64ms), high mAP | Misses occluded objects |
+| **RT-DETR-L** | Global context via attention | Slow (405ms), low raw confidence |
+| **Faster R-CNN** | High confidence, strong 2-stage proposals | Slow (203ms), memory heavy |
+| **SSD** | Fastest (28ms), multi-scale anchors | Lower mAP for small objects |
+
+By combining them, the ensemble captures the best of each: the global reasoning of RT-DETR, the high mAP of YOLO, the per-region precision of Faster R-CNN, and the small-object multi-scale detection of SSD.
+
+### Ensemble Method 1 — Weighted Box Fusion (WBF)
+
+WBF is superior to simple NMS for multi-model ensembles. Instead of discarding overlapping boxes, it **averages** them weighted by their confidence scores — producing tighter, more accurate bounding boxes.
+
+```
+Image ──→ YOLOv8s      → [boxes, scores, labels] ─┐
+Image ──→ RT-DETR-L    → [boxes, scores, labels] ─┤
+Image ──→ Faster R-CNN → [boxes, scores, labels] ─┤→ WBF → Fused detections
+Image ──→ SSD          → [boxes, scores, labels] ─┘
+```
+
+**WBF Algorithm:**
+1. Pool all predicted boxes from all models into one list, sorted by confidence.
+2. For each box, check IoU against existing "clusters." If IoU ≥ threshold with the same class → merge into that cluster.
+3. Each cluster's final box = **weighted average** of all member boxes, weights = confidence scores.
+4. Final score = mean confidence across models that detected that object.
+
+```python
+# Simplified WBF
+def wbf(all_boxes, all_scores, all_labels, iou_thr=0.50):
+    # Flatten, sort by confidence, cluster overlapping boxes
+    # Output: averaged boxes weighted by score
+    ...
+```
+
+**Why WBF beats NMS for ensembles:**
+- NMS keeps one box and discards all overlapping ones — loses information from other models.
+- WBF keeps all predictions and fuses them — the more models agree on a detection, the higher confidence it gets. If a box only appears in one model, it gets a lower fused score, naturally filtering false positives.
+
+### Ensemble Method 2 — Speed-Accuracy Cascade
+
+Not every image needs all four models. A **cascade** uses the fast models first and only escalates to the heavy models when uncertain:
+
+```
+Image → SSD (28ms)
+  └── Max confidence ≥ 0.70? → Return immediately  ⚡ ~28ms
+  └── No? → Also run YOLOv8s (64ms) + WBF fusion
+       └── Max confidence ≥ 0.70? → Return          🔄 ~92ms
+       └── No? → Also run RT-DETR-L                 🎯 ~500ms
+```
+
+**Expected distribution on drone dataset:**
+- ~60-70% of images resolved at Stage 1 (SSD alone)
+- ~20-30% resolved at Stage 2 (SSD + YOLO)
+- ~5-10% escalated to Stage 3 (all three)
+- **Result:** Average latency ~60-80ms with RT-DETR-level accuracy for hard cases
+
+### How the Notebook Is Structured
+
+| Cell | Content |
+|------|---------|
+| **1 · Imports** | PyTorch, OpenCV, Ultralytics, auto-detects MPS/CUDA/CPU |
+| **2 · Config** | Local paths to all 4 weights, generates absolute-path YAML |
+| **3 · Builders** | `build_fasterrcnn()` and `build_ssd()` matching exact training architectures |
+| **4 · Load Models** | Loads all 4 checkpoints with ✅/❌ status per model |
+| **5 · Validate YOLO/DETR** | Ultralytics `.val()` → mAP50, mAP50-95, Precision, Recall |
+| **6 · Evaluate FRCNN/SSD** | `torchmetrics` mAP@0.5 + per-image timing |
+| **7 · Results Table** | Styled HTML comparison table, saves `eval_results_local.csv` |
+| **8 · Inference Demo** | Side-by-side 4×4 grid of all models on same test images |
+| **🧬 WBF Ensemble** | `wbf()` function implementation + `ensemble_predict()` wrapper |
+| **🧬 Visual Demo** | Top row: individual models, bottom row: WBF fused result |
+| **⚡ Cascade** | `cascade_predict()` — 3-stage escalation with timing report |
+| **📊 Speed Benchmark** | Horizontal bar chart: individual models vs ensemble vs cascade |
+| **9 · Latency Chart** | FPS and latency bar charts for all models |
+| **10 · Architecture Table** | Backbone / neck / head / parameters for all 4 models |
+
+### Critical Architecture Matching
+
+When loading `.pth` checkpoints, the **model architecture must exactly match** what was used during training. The notebook uses:
+
+```python
+# Faster R-CNN — MobileNetV3 (not ResNet-50!)
+# Must match fasterrcnn_drone.pth training architecture
+model = fasterrcnn_mobilenet_v3_large_320_fpn(weights=None)
+
+# SSD — in_channels must EXACTLY match backbone feature map sizes
+in_channels = [672, 480, 512, 256, 256, 128]  # MobileNetV3-Large fixed channels
+```
+
+Using the wrong backbone (e.g., ResNet-50 instead of MobileNetV3) causes `RuntimeError: size mismatch` on `model.load_state_dict()`.
+
+---
 
 ### Architecture Comparison
 
@@ -571,30 +777,46 @@ else:
 ```
 Drone-Detection/
 │
-├── 📓 Notebooks
+├── 📓 Core Notebooks
+│   ├── benchmark_models.ipynb           # 🏆 Multi-model inference benchmark (all 4 models)
+│   ├── multi_model_architecture.ipynb   # 🧬 WBF ensemble + cascade inference
+│   ├── train_yolov8s_multiclass.ipynb   # YOLOv8s multi-class training
+│   ├── view_yolov8s_results.ipynb       # YOLOv8s inference & results
 │   ├── fastercnn_drone_test.ipynb       # Faster R-CNN inference & evaluation
 │   ├── ssdnet.ipynb                     # SSD training (Kaggle)
 │   ├── ssd_net_kaggle_main.ipynb        # SSD local inference & evaluation
-│   ├── train_yolov8s_multiclass.ipynb   # YOLOv8s multi-class training
-│   ├── view_yolov8s_results.ipynb       # YOLOv8s inference & results
-│   └── yolo_main_kaggle.ipynb           # YOLO custom inference (fixed labels)
+│   ├── detr_kaggle.ipynb                # RT-DETR-L training (Kaggle)
+│   └── yolo8s-kaggle.ipynb              # YOLO Kaggle training variant
 │
 ├── 🤖 Model Weights
-│   ├── fasterrcnn_drone.pth             # Faster R-CNN weights (~76 MB)
-│   ├── ssd_drone_model_kaggle.pth       # SSD weights (~11 MB)
-│   └── drone_yolov8s_final.pt           # YOLOv8s weights (~22 MB)
+│   ├── drone_yolov8s_final.pt           # YOLOv8s weights (~22 MB)
+│   ├── best_detr.pt                     # RT-DETR-L weights (~189 MB)
+│   ├── fasterrcnn_drone.pth             # Faster R-CNN — MobileNetV3-320-FPN (~76 MB)
+│   └── ssd_drone_model_kaggle.pth       # SSD MobileNetV3-Large-320 (~11 MB)
 │
 ├── 📊 Dataset
-│   ├── drone-dataset/                   # Local dataset (train/valid/test)
-│   │   ├── train/images/ (10,799 imgs)
-│   │   ├── valid/images/ (603 imgs)
-│   │   └── test/images/  (596 imgs)
-│   └── drone_dataset.yaml               # Dataset config for YOLO
+│   ├── drone-dataset/                   # Local dataset (train/valid/test splits)
+│   │   ├── train/
+│   │   │   ├── images/  (10,799 images)
+│   │   │   └── labels/  (YOLO .txt annotations)
+│   │   ├── valid/
+│   │   │   ├── images/  (603 images)
+│   │   │   └── labels/
+│   │   └── test/
+│   │       ├── images/  (596 images)
+│   │       └── labels/
+│   ├── drone_dataset.yaml               # Original YAML (relative paths)
+│   └── drone_local.yaml                 # Auto-generated YAML (absolute paths for local use)
 │
-└── 📈 Results
+└── 📈 Results & Outputs
+    ├── runs/                            # YOLO/RT-DETR Ultralytics training runs
     ├── results/                         # Training result plots
-    ├── runs/                            # YOLO training runs
-    └── ssd_test_results.png             # SSD detection visualization
+    ├── benchmark_results.csv            # Benchmark summary table
+    ├── eval_results_local.csv           # Ensemble notebook evaluation results
+    ├── inference_comparison.png         # Side-by-side model predictions
+    ├── ensemble_demo.png                # WBF ensemble vs individual models
+    ├── latency_comparison.png           # Speed / FPS bar charts
+    └── ensemble_speed_comparison.png    # Cascade vs ensemble speed chart
 ```
 
 ---
